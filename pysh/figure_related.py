@@ -103,46 +103,6 @@ def visualize_multi_channels(data, channel, title, save_path):
     plt.savefig(os.path.join(FIGURE_DIR, save_path))
     plt.close()
 
-def stack_average_signals(filtered_data, fs=1000):
-    """
-    对心磁信号进行叠加平均处理
-    
-    参数:
-    filtered_data: 滤波后的数据矩阵 [channel, data_length]
-    fs: 采样率 (Hz)
-    
-    返回:
-    stack_average: 叠加平均后的数据矩阵 [channel, window_length]
-    """
-    # 使用第29通道数据（索引为28）进行R波检测
-    r_channel = filtered_data[28, :]
-
-    # 使用scipy的find_peaks函数找到R波峰值
-    peaks, _ = signal.find_peaks(r_channel, distance=int(fs * 0.5))
-    
-    # 每个周期取R波峰前fs/3个点和后2fs/3个点
-    d = int(0.333 * fs)
-    window_length = 3 * d + 1
-    
-    # 初始化用于存放叠加平均结果的矩阵
-    stack_average = np.zeros((filtered_data.shape[0], window_length))
-    
-    # 对每个通道进行叠加平均
-    for i in range(filtered_data.shape[0]):
-        heartbeat_segments = []
-        # 从第二个R波到倒数第二个R波进行叠加
-        for j in range(1, len(peaks)-1):
-            start_idx = peaks[j] - d
-            end_idx = peaks[j] + 2 * d + 1
-            if start_idx >= 0 and end_idx <= filtered_data.shape[1]:
-                segment = filtered_data[i, start_idx:end_idx]
-                heartbeat_segments.append(segment)
-        
-        # 计算平均值
-        if heartbeat_segments:
-            stack_average[i, :] = np.mean(heartbeat_segments, axis=0)
-    
-    return stack_average
 
 def plot_butterfly_diagram(stack_average, save_path='butterfly_diagram.png'):
     """
@@ -320,3 +280,22 @@ def plot_all_channels_butterfly(stack_average, channel, save_path='butterfly_dia
     plt.tight_layout(rect=[0, 0, 1, 0.96])  # 为总标题留出空间
     plt.savefig(os.path.join(FIGURE_DIR, save_path))
     plt.close()
+
+def visualize_sample_processing(raw_data, filtered_data, channel, fs, channel_idx=None):
+    """
+    可视化样本处理过程中的各个步骤
+    
+    参数:
+    raw_data: 原始数据
+    filtered_data: 滤波后的数据
+    channel: 通道数
+    fs: 采样率 (Hz)
+    channel_idx: 要可视化的通道索引，如果为None则可视化所有通道
+    """
+    print("正在生成可视化图表...")
+    
+    # 可视化预处理结果
+    visualize_preprocessing_results(raw_data, filtered_data, channel)
+    
+    print("所有可视化图表已保存")
+
