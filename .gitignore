@@ -1,2 +1,5 @@
-.DS_Store
-__pycache__
+# 忽略所有目录下的 .DS_Store（macOS）
+**/.DS_Store
+
+# 忽略所有目录下的 __pycache__
+**/__pycache__
