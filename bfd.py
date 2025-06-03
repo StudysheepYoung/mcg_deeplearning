@@ -21,6 +21,37 @@ from pysh.signal_related import (
 )
 import math
 
+def apply_stft(signal_data, fs=1000, nperseg=256, noverlap=128):
+    """
+    对信号进行短时傅里叶变换
+    
+    参数:
+    signal_data: 输入信号，形状为 [channels, time]
+    fs: 采样率
+    nperseg: 每个段的长度
+    noverlap: 重叠长度
+    
+    返回:
+    stft_data: STFT结果，形状为 [channels, freq_bins, time_frames]
+    """
+    channels, time_points = signal_data.shape
+    
+    # 对第一个通道进行STFT以获取输出维度
+    _, _, Zxx = signal.stft(signal_data[0], fs=fs, nperseg=nperseg, noverlap=noverlap)
+    freq_bins, time_frames = Zxx.shape
+    
+    # 创建输出数组
+    stft_data = np.zeros((channels, freq_bins, time_frames), dtype=np.complex64)
+    
+    # 对每个通道进行STFT
+    for i in range(channels):
+        _, _, Zxx = signal.stft(signal_data[i], fs=fs, nperseg=nperseg, noverlap=noverlap)
+        stft_data[i] = Zxx
+    
+    # 取幅度谱
+    stft_magnitude = np.abs(stft_data)
+    return stft_magnitude
+
 def read_bfd_file(filename, header_size, channel, fs):
     """
     读取心磁数据文件
@@ -99,9 +130,17 @@ def read_bfd_file(filename, header_size, channel, fs):
         return None
 
 class MCGDataset(Dataset):
-    def __init__(self, data_list, label_list):
-        self.data_list = [torch.FloatTensor(data) for data in data_list]
-        self.label_list = [torch.FloatTensor([label]) for label in label_list]
+    def __init__(self, data_list, label_list, fs=1000):
+        self.label_list = [torch.LongTensor([label-1]) for label in label_list]  # 标签从0开始
+        
+        # 对每个样本进行STFT处理
+        self.data_list = []
+        for data in data_list:
+            # 应用STFT
+            stft_data = apply_stft(data, fs=fs)
+            # 转换为PyTorch张量
+            stft_tensor = torch.FloatTensor(stft_data)
+            self.data_list.append(stft_tensor)
 
     def __len__(self):
         return len(self.data_list)
@@ -146,25 +185,25 @@ class TransformerBlock(nn.Module):
         return src
 
 class MCGCNNTransformer(nn.Module):
-    def __init__(self, input_channels=36, num_classes=1, d_model=256, nhead=8, num_layers=3):
+    def __init__(self, input_channels=36, num_classes=2, d_model=256, nhead=8, num_layers=3):
         super(MCGCNNTransformer, self).__init__()
         
         # CNN部分用于特征提取
         self.cnn = nn.Sequential(
-            nn.Conv1d(input_channels, 64, kernel_size=7, stride=2, padding=3),
-            nn.BatchNorm1d(64),
+            nn.Conv2d(input_channels, 64, kernel_size=3, stride=1, padding=1),  # 修改为2D卷积
+            nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
+            nn.MaxPool2d(kernel_size=2, stride=2),
             
-            nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm1d(128),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
+            nn.MaxPool2d(kernel_size=2, stride=2),
             
-            nn.Conv1d(128, d_model, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm1d(d_model),
+            nn.Conv2d(128, d_model, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(d_model),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
+            nn.MaxPool2d(kernel_size=2, stride=2)
         )
         
         # Transformer部分
@@ -183,10 +222,14 @@ class MCGCNNTransformer(nn.Module):
 
     def forward(self, x):
         # CNN特征提取
-        x = self.cnn(x)  # [batch, d_model, seq_len]
+        x = self.cnn(x)  # [batch, d_model, freq, time]
+        
+        # 将频率和时间维度合并
+        batch_size = x.size(0)
+        x = x.view(batch_size, x.size(1), -1)  # [batch, d_model, freq*time]
         
         # 调整维度顺序以适应Transformer
-        x = x.permute(2, 0, 1)  # [seq_len, batch, d_model]
+        x = x.permute(2, 0, 1)  # [freq*time, batch, d_model]
         
         # 添加位置编码
         x = self.pos_encoder(x)
@@ -208,25 +251,35 @@ def train_model(model, data_loader, num_epochs=10):
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-    criterion = nn.MSELoss()
+    criterion = nn.CrossEntropyLoss()  # 使用交叉熵损失函数
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
 
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0
+        correct = 0
+        total = 0
+        
         for batch, label in data_loader:
             batch = batch.to(device)
-            label = label.to(device)
+            label = label.squeeze().to(device)  # 确保标签维度正确
             optimizer.zero_grad()
             output = model(batch)
             loss = criterion(output, label)
             loss.backward()
             optimizer.step()
+            
             total_loss += loss.item()
+            
+            # 计算准确率
+            _, predicted = torch.max(output.data, 1)
+            total += label.size(0)
+            correct += (predicted == label).sum().item()
 
         avg_loss = total_loss / len(data_loader)
-        print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}')
+        accuracy = 100 * correct / total
+        print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%')
         scheduler.step(avg_loss)
 
 def load_all_data(base_dir, header_size, channel, fs):
@@ -259,6 +312,7 @@ def main():
     header_size = 2048  # 包头大小（字节）
     channel = 36  # 通道数
     fs = 1000  # 采样率 (Hz)
+    num_classes = 2  # 分类数量
     
     # 加载所有数据
     print("正在加载数据...")
@@ -271,19 +325,19 @@ def main():
             print(f"样本 {i+1} 的数据形状: {data.shape}")
         
         # 创建数据集和数据加载器
-        dataset = MCGDataset(data_list, label_list)
+        dataset = MCGDataset(data_list, label_list, fs=fs)
         data_loader = DataLoader(dataset, batch_size=32, shuffle=True)
 
         # 创建模型
-        model = MCGCNNTransformer(input_channels=channel)
+        model = MCGCNNTransformer(input_channels=channel, num_classes=num_classes)
 
         # 训练模型
         print("开始训练模型...")
         train_model(model, data_loader)
 
         # 保存模型
-        torch.save(model.state_dict(), 'mcg_cnn_transformer.pth')
-        print("模型已保存为 mcg_cnn_transformer.pth")
+        torch.save(model.state_dict(), 'mcg_cnn_transformer_stft.pth')
+        print("模型已保存为 mcg_cnn_transformer_stft.pth")
 
 
 if __name__ == "__main__":
